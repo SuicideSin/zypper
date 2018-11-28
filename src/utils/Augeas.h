@@ -12,6 +12,7 @@ extern "C"
 {
   #include <augeas.h>
 }
+#include <iosfwd>
 #include <string>
 
 #include <zypp/base/NonCopyable.h>
@@ -21,6 +22,7 @@ extern "C"
  */
 class Augeas : private zypp::base::NonCopyable
 {
+  friend std::ostream & operator<<( std::ostream & str_r, const Augeas & obj_r );
 public:
   Augeas( const std::string & file = "" );
   ~Augeas();

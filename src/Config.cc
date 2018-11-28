@@ -224,7 +224,7 @@ void Config::read( const std::string & file )
     std::string s;
 
     Augeas augeas(file);
-
+USR << augeas << endl;
     m.elapsed();
 
     // ---------------[ main ]--------------------------------------------------

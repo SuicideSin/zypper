@@ -18,7 +18,7 @@ Augeas::Augeas( const std::string & file )
 , _got_global_zypper_conf( false )
 , _got_user_zypper_conf( false )
 {
-  MIL << "Going to read zypper config using Augeas..." << endl;
+  MIL << "Going to read zypper config using Augeas..." << file << endl;
 
   // init
   _augeas = ::aug_init( NULL, "/usr/share/zypper", AUG_NO_STDINC | AUG_NO_LOAD );
@@ -39,7 +39,7 @@ Augeas::Augeas( const std::string & file )
       std::string wd( env ? env : "." );
       filepath = wd / filepath;
     }
-
+MIL << "/augeas/load/ZYpper/incl" / filepath << endl;
     if ( ::aug_set( _augeas, "/augeas/load/ZYpper/incl", filepath.asString().c_str() ) != 0 )
       ZYPP_THROW(Exception(_("Augeas error: setting config file to load failed.")));
   }
@@ -54,6 +54,7 @@ Augeas::Augeas( const std::string & file )
     {
       // add $HOME/.zypper.conf; /etc/zypp/zypper.conf should already be included
       filepath = _homedir + "/.zypper.conf";
+MIL << "/augeas/load/ZYpper/incl[2]" / filepath << endl;
       if ( ::aug_set( _augeas, "/augeas/load/ZYpper/incl[2]", filepath.asString().c_str() ) != 0 )
         ZYPP_THROW(Exception(_("Augeas error: setting config file to load failed.")));
     }
@@ -181,4 +182,171 @@ std::string Augeas::getOption( const std::string & option ) const
   return std::string();
 }
 
-// ---------------------------------------------------------------------------
+///////////////////////////////////////////////////////////////////
+namespace
+{
+  ///////////////////////////////////////////////////////////////////
+  struct AugRef
+  {
+    AugRef( const ::augeas & aug_r )
+    : _aug { aug_r }
+    {}
+
+    const augeas *const aug() const
+    { return &_aug; }
+
+//     augeas *const aug()
+//     { return &_aug; }
+
+  private:
+    const ::augeas & _aug;
+  };
+
+  ///////////////////////////////////////////////////////////////////
+  struct AugPath : public AugRef, public std::string
+  {
+    AugPath( const AugRef & aug_r, std::string path_r = std::string() )
+    : AugRef { aug_r }
+    , std::string { std::move(path_r) }
+    {}
+
+    std::string label() const
+    {
+      const char * v { nullptr };
+      if ( ::aug_label( aug(), c_str(), &v ) == 1 )
+	return v;
+      throw std::domain_error( std::string("Bad path ")+*this );
+    }
+
+    std::pair<std::string,bool> valueIf() const
+    {
+      const char * v { nullptr };
+      if ( ::aug_get( aug(), c_str(), &v ) == 1 )
+	return { v ? v : "", bool(v) };
+      throw std::domain_error( std::string("Bad path ")+*this );
+    }
+
+    bool hasvalue() const
+    { return valueIf().second; }
+
+    std::string value() const
+    { return valueIf().first; }
+  };
+
+
+  ///////////////////////////////////////////////////////////////////
+  struct AugMatch : public AugRef
+  {
+    AugMatch( const AugRef & aug_r, const char * path_r )
+    : AugRef { aug_r }
+    {
+      int res = ::aug_match( aug(), path_r, &_matches );
+      if ( res == -1 )
+	throw std::domain_error( std::string("Bad path ")+path_r );
+      _cnt = res;
+    }
+
+    AugMatch( const AugRef & aug_r, const std::string & path_r )
+    : AugMatch { aug_r, path_r.c_str() }
+    {}
+
+    AugMatch( const AugPath & path_r )
+    : AugMatch { path_r, path_r.c_str() }
+    {}
+
+    ~AugMatch()
+    {
+      if ( _matches )
+      {
+	while ( _cnt-- )
+	  ::free( _matches[_cnt] );
+	::free( _matches );
+      }
+    }
+
+  private:
+    struct Stringify : public AugRef
+    {
+      Stringify( const AugRef & aug_r )
+      : AugRef { aug_r }
+      {}
+
+      typedef AugPath result_type;
+      result_type operator()( char * el_r ) const
+      { return { *this, el_r }; }
+    };
+
+  public:
+    typedef Stringify::result_type value_type;
+
+    typedef transform_iterator<Stringify,char**> const_iterator;
+
+    bool empty() const
+    { return _cnt; }
+
+    unsigned size() const
+    { return _cnt; }
+
+    const_iterator begin() const
+    { return make_transform_iterator( _matches, Stringify( *this ) ); }
+
+    const_iterator end() const
+    { return make_transform_iterator( _matches+_cnt, Stringify( *this ) ); }
+
+    value_type operator[]( unsigned idx_r ) const
+    {
+      if ( idx_r < _cnt )
+	return { *this, _matches[idx_r] };
+      throw std::out_of_range( "Bad index" );
+    }
+
+  private:
+    unsigned		_cnt	{ 0U };
+    char **		_matches{ nullptr };
+  };
+
+  ///////////////////////////////////////////////////////////////////
+  struct DumpAugeas
+  {
+    DumpAugeas( const ::augeas & aug_r )
+    : _aug  { aug_r }
+    {}
+
+    std::ostream & dumpOn( std::ostream & str_r ) const
+    { return recDumpOn( str_r, "/" ); }
+
+  private:
+    std::ostream & recDumpOn( std::ostream & str_r, const std::string & path_r ) const
+    {
+      for ( const auto & n : AugMatch( _aug, path_r) )
+      {
+	str_r
+	<< "  " << n
+	<< " -{" << n.label() << "}- "
+	<< " -" << ( n.hasvalue() ? "\""+n.value()+"\"" : "" ) << "- "
+	<< endl;
+	recDumpOn( str_r, n+"/*" );
+      }
+      return str_r;
+
+    }
+
+  private:
+    const ::augeas & _aug;
+  };
+
+  inline std::ostream & operator<<( std::ostream & str_r, const DumpAugeas & obj_r )
+  { return obj_r.dumpOn( str_r ); }
+
+} // namespace
+///////////////////////////////////////////////////////////////////
+
+std::ostream & operator<<( std::ostream & str_r, const Augeas & obj_r )
+{
+  if ( ::augeas * aug = obj_r._augeas )
+    str_r << "Augeas {" << endl << DumpAugeas(*aug) << "}";
+  else
+    str_r << "Augeas {}";
+
+  return str_r;
+}
